@@ -13,10 +13,12 @@ std::vector<float> LlamaEngine::forward(int token, int pos) {
     int hidden_dim = config_.hidden_dim;
     int head_size = dim / config_.n_heads;
 
+    // Start this decode step from the token embedding row.
     float* content_row = weights_.token_embedding_table + (size_t)token * dim;
     std::memcpy(x, content_row, (size_t)dim * sizeof(float));
 
     for (int l = 0; l < config_.n_layers; l++) {
+        // ---- Attention block ----
         rmsnorm(state_.xb, x, weights_.rms_att_weight + (size_t)l * dim, dim);
 
         int loff = l * config_.seq_len * kv_dim;
@@ -27,6 +29,7 @@ std::vector<float> LlamaEngine::forward(int token, int pos) {
         matmul(state_.k, state_.xb, weights_.wk + (size_t)l * dim * kv_dim, dim, kv_dim);
         matmul(state_.v, state_.xb, weights_.wv + (size_t)l * dim * kv_dim, dim, kv_dim);
 
+        // Apply RoPE to q/k in-place, pairwise over channels.
         for (int i = 0; i < dim; i += 2) {
             int head_dim = i % head_size;
             float freq = 1.0f / std::pow(10000.0f, head_dim / (float)head_size);
@@ -43,6 +46,7 @@ std::vector<float> LlamaEngine::forward(int token, int pos) {
             }
         }
 
+        // Per-head causal attention over timesteps [0..pos].
         for (int h = 0; h < config_.n_heads; h++) {
             float* q = state_.q + h * head_size;
             float* att = state_.att + (size_t)h * config_.seq_len;
@@ -70,16 +74,19 @@ std::vector<float> LlamaEngine::forward(int token, int pos) {
             }
         }
 
+        // Project concatenated head outputs back to model dimension.
         matmul(state_.xb2, state_.xb, weights_.wo + (size_t)l * dim * dim, dim, dim);
         for (int i = 0; i < dim; i++) {
             x[i] += state_.xb2[i];
         }
 
+        // ---- FFN block ----
         rmsnorm(state_.xb, x, weights_.rms_ffn_weight + (size_t)l * dim, dim);
 
         matmul(state_.hb, state_.xb, weights_.w1 + (size_t)l * dim * hidden_dim, dim, hidden_dim);
         matmul(state_.hb2, state_.xb, weights_.w3 + (size_t)l * dim * hidden_dim, dim, hidden_dim);
 
+        // SwiGLU: silu(W1(x)) * W3(x)
         for (int i = 0; i < hidden_dim; i++) {
             float val = state_.hb[i];
             val *= (1.0f / (1.0f + std::exp(-val)));
@@ -93,6 +100,7 @@ std::vector<float> LlamaEngine::forward(int token, int pos) {
         }
     }
 
+    // Final norm + classifier projection to logits.
     rmsnorm(x, x, weights_.rms_final_weight, dim);
     matmul(state_.logits, x, weights_.wcls, config_.dim, config_.vocab_size);
 

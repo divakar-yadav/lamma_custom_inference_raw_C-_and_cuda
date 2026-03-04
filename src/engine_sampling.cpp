@@ -38,6 +38,7 @@ int LlamaEngine::compare_prob_index(const void* a, const void* b) {
 
 int LlamaEngine::sample_topp(const float* probabilities, int n, float topp, ProbIndex* probindex, float coin) {
     int n0 = 0;
+    // Cheap pre-filter: entries below cutoff cannot survive nucleus truncation.
     const float cutoff = (1.0f - topp) / (n - 1);
     for (int i = 0; i < n; i++) {
         if (probabilities[i] >= cutoff) {
@@ -83,6 +84,7 @@ float LlamaEngine::random_f32(uint64_t* state) {
 
 int LlamaEngine::sample(float* logits, float temperature, float topp, uint64_t* rng_state, std::vector<ProbIndex>& probindex) {
     if (temperature == 0.0f) {
+        // Deterministic path used for reproducible regression tests.
         return sample_argmax(logits, config_.vocab_size);
     }
 
@@ -106,6 +108,7 @@ std::string LlamaEngine::generate(
     float topp,
     uint64_t seed
 ) {
+    // Prompt tokens are "forced"; after prompt is consumed we sample autoregressively.
     std::vector<int> prompt_tokens = tokenizer.encode(prompt, true, false);
     if (prompt_tokens.empty()) {
         throw std::runtime_error("Prompt tokenization returned empty sequence");
@@ -122,6 +125,7 @@ std::string LlamaEngine::generate(
     out.reserve((size_t)steps * 4);
 
     while (pos < steps) {
+        // Forward produces logits for next token at current position.
         auto logits_vec = forward(token, pos);
         float* logits = logits_vec.data();
 

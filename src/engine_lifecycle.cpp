@@ -23,13 +23,14 @@ LlamaEngine::~LlamaEngine() {
 
 void LlamaEngine::malloc_run_state() {
     int kv_dim = (config_.dim * config_.n_kv_heads) / config_.n_heads;
+    // These buffers represent the "activation wave" for one decoded token.
     state_.x = (float*)std::calloc((size_t)config_.dim, sizeof(float));
     state_.xb = (float*)std::calloc((size_t)config_.dim, sizeof(float));
     state_.xb2 = (float*)std::calloc((size_t)config_.dim, sizeof(float));
     state_.hb = (float*)std::calloc((size_t)config_.hidden_dim, sizeof(float));
     state_.hb2 = (float*)std::calloc((size_t)config_.hidden_dim, sizeof(float));
     state_.q = (float*)std::calloc((size_t)config_.dim, sizeof(float));
-    // k and v are aliases into key_cache/value_cache rows during forward().
+    // k and v are not standalone allocations; they are aliases into KV cache rows.
     state_.k = nullptr;
     state_.v = nullptr;
     state_.key_cache = (float*)std::calloc((size_t)config_.n_layers * config_.seq_len * kv_dim, sizeof(float));
@@ -62,6 +63,7 @@ void LlamaEngine::memory_map_weights(float* ptr, int shared_weights) {
     int head_size = config_.dim / config_.n_heads;
     unsigned long long n_layers = (unsigned long long)config_.n_layers;
 
+    // Checkpoint layout is contiguous; we walk pointer offsets in exact export order.
     weights_.token_embedding_table = ptr;
     ptr += config_.vocab_size * config_.dim;
     weights_.rms_att_weight = ptr;
@@ -100,6 +102,7 @@ void LlamaEngine::load_model(const std::string& checkpoint_path) {
         throw std::runtime_error("Failed reading Config header");
     }
 
+    // Legacy format uses sign of vocab_size to encode tied output embedding.
     int shared_weights = config_.vocab_size > 0 ? 1 : 0;
     config_.vocab_size = std::abs(config_.vocab_size);
 
@@ -117,6 +120,7 @@ void LlamaEngine::load_model(const std::string& checkpoint_path) {
         throw std::runtime_error("mmap failed on checkpoint");
     }
 
+    // Weights start immediately after Config header.
     float* weights_ptr = data_ + sizeof(Config) / sizeof(float);
     memory_map_weights(weights_ptr, shared_weights);
     malloc_run_state();

@@ -5,6 +5,7 @@
 namespace llama_cpp_ref {
 
 void LlamaEngine::rmsnorm(float* o, const float* x, const float* weight, int size) {
+    // RMSNorm uses root mean square only (no mean-centering like LayerNorm).
     float ss = 0.0f;
     for (int j = 0; j < size; j++) {
         ss += x[j] * x[j];
@@ -18,6 +19,7 @@ void LlamaEngine::rmsnorm(float* o, const float* x, const float* weight, int siz
 }
 
 void LlamaEngine::softmax(float* x, int size) {
+    // Numerically stable softmax: subtract max(logit) before exp().
     float max_val = x[0];
     for (int i = 1; i < size; i++) {
         if (x[i] > max_val) {
@@ -36,6 +38,7 @@ void LlamaEngine::softmax(float* x, int size) {
 }
 
 void LlamaEngine::matmul(float* xout, const float* x, const float* w, int n, int d) {
+    // Reference GEMV: W[d,n] @ x[n] -> xout[d].
     for (int i = 0; i < d; i++) {
         float val = 0.0f;
         for (int j = 0; j < n; j++) {
