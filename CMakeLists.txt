@@ -7,7 +7,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(LLAMA_INFERENCE_ENABLE_OPENMP "Enable OpenMP for CPU parallel loops" ON)
 
-add_library(llama_engine src/llama_engine.cpp)
+add_library(llama_engine
+    src/tokenizer.cpp
+    src/engine_lifecycle.cpp
+    src/engine_math_kernels.cpp
+    src/engine_forward.cpp
+    src/engine_sampling.cpp
+)
 target_include_directories(llama_engine PUBLIC include)
 
 if(LLAMA_INFERENCE_ENABLE_OPENMP)
