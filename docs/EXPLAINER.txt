@@ -1,0 +1,126 @@
+Llama Inference C++ Repository Explainer
+=======================================
+
+1) Goal
+-------
+This repository is a clean C++17 implementation of Llama-style autoregressive inference.
+It loads a model checkpoint (.bin), loads tokenizer.bin, runs forward passes token-by-token,
+and generates output text.
+
+2) Project Structure
+--------------------
+- include/llama_engine.hpp
+  Public API for:
+  - Tokenizer loading/encoding/decoding
+  - LlamaEngine model loading, forward pass, generation
+
+- src/llama_engine.cpp
+  Core implementation:
+  - checkpoint parsing and memory mapping
+  - tensor pointer mapping for all model weights
+  - RMSNorm / softmax / matmul primitives
+  - transformer forward pass
+  - sampling (argmax, multinomial, top-p)
+
+- src/main.cpp
+  CLI entrypoint for inference.
+
+- tests/test_tokenizer.cpp
+  Tokenizer correctness checks against known expected token IDs.
+
+- tests/test_generation.cpp
+  Deterministic regression test for generated text.
+
+- scripts/download_test_models.sh
+  Downloads tiny test model + tokenizer assets from Hugging Face.
+
+- CMakeLists.txt
+  Build configuration for library, CLI executable, and tests.
+
+3) Core Runtime Flow
+--------------------
+(1) load_model(checkpoint.bin)
+    - Reads Config header
+    - Resolves shared classifier flag
+    - mmap() model file
+    - Maps float pointers for embedding, RMSNorm, QKV/O, FFN, final norm, classifier
+    - Allocates run-state buffers and KV cache
+
+(2) load tokenizer
+    - Reads tokenizer.bin
+    - Loads token strings + scores
+    - Supports UTF-8 handling, byte fallback, BPE merges
+
+(3) generate(prompt)
+    - encode prompt to token IDs
+    - for each position:
+      - forward(token, pos) -> logits
+      - choose next token using prompt forcing or sampling
+      - decode piece and append to output
+
+4) Forward Pass Math
+--------------------
+For each token position:
+
+x = token_embedding[token]
+for each layer l:
+  xb = RMSNorm_att(x)
+  q = Wq[l] * xb
+  k = Wk[l] * xb
+  v = Wv[l] * xb
+  apply RoPE(q, k, pos)
+  attn = softmax(q dot K_cache / sqrt(head_size))
+  head_out = sum(attn * V_cache)
+  x = x + Wo[l] * head_out
+
+  xb = RMSNorm_ffn(x)
+  h1 = W1[l] * xb
+  h3 = W3[l] * xb
+  h  = SiLU(h1) * h3
+  x = x + W2[l] * h
+
+x = RMSNorm_final(x)
+logits = Wcls * x
+
+5) Sampling Logic
+-----------------
+- temperature == 0.0: argmax (deterministic)
+- otherwise:
+  - divide logits by temperature
+  - softmax -> probabilities
+  - top-p disabled: multinomial sample over full vocab
+  - top-p enabled: nucleus truncation then sample
+
+6) Tests and Correctness
+------------------------
+A) tokenizer_test
+- Verifies tokenizer output IDs for known strings
+- This ensures encode() behavior matches reference behavior
+
+B) generation_test
+- Uses stories260K.bin and tok512.bin
+- Runs 200 steps with temperature=0.0
+- Compares generated output with known expected reference string
+- Pass means model loading + forward + decoding are coherent
+
+7) Build and Run
+----------------
+Build:
+  cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+  cmake --build build -j
+
+Download test assets:
+  ./scripts/download_test_models.sh
+
+Run tests:
+  ./build/tokenizer_test ./models/tokenizer.bin
+  ./build/generation_test ./models/stories260K.bin ./models/tok512.bin
+
+Run inference:
+  ./build/llama_infer_cpp ./models/stories260K.bin --tokenizer ./models/tok512.bin --steps 100 --temperature 0.8 --topp 0.9
+
+8) Notes
+--------
+- The implementation focuses on clarity and correctness over heavy optimization.
+- OpenMP linkage is enabled when available through CMake option.
+- This is a CPU C++ reference implementation intended for explainability and validation.

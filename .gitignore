@@ -1,0 +1,43 @@
+# Build outputs
+build/
+build_asan/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Compiled binaries/libs
+*.o
+*.a
+*.so
+*.out
+*.exe
+llama_infer_cpp
+tokenizer_test
+generation_test
+
+# Model artifacts (large)
+models/
+*.bin
+*.pt
+*.pth
+*.safetensors
+
+# Logs / temp
+*.log
+*.tmp
+*.swp
+core
+core.*
+err.txt
+stdout.txt
+
+# LaTeX build intermediates
+*.aux
+*.toc
+*.out
+
+# Python cache (from utility scripts)
+__pycache__/
+*.pyc
+

@@ -1,0 +1,157 @@
+LLAMA 7B CUDA Kernel Handbook (Modular, Kernel-Wise)
+====================================================
+
+Status
+------
+This handbook documents the modular CUDA kernels added in this repository for a
+Llama-7B-style forward pass. Kernels are separated file-by-file for readability.
+
+Model context used
+------------------
+- Checkpoint: models/open_llama_7b_v2.bin
+- Tokenizer:  models/open_llama_7b_v2_tokenizer.bin
+- Typical 7B shape:
+  - dim=4096
+  - n_layers=32
+  - n_heads=32
+  - head_size=128
+  - hidden_dim=11008
+
+Kernel-wise file layout
+-----------------------
+- include/cuda_kernels/llama_cuda_kernels.cuh
+  Public launch API for each kernel.
+
+- src/cuda_kernels/rmsnorm_kernel.cu
+  RMSNorm kernel:
+    out[j] = weight[j] * (x[j] / sqrt(mean(x^2) + eps))
+
+- src/cuda_kernels/matvec_kernel.cu
+  Matrix-vector kernel:
+    out[i] = sum_j W[i,j] * x[j]
+  Used for Wq, Wk, Wv, Wo, W1, W2, W3, Wcls style projections.
+
+- src/cuda_kernels/rope_kernel.cu
+  RoPE rotation kernel on q and k vectors for current position.
+
+- src/cuda_kernels/attention_scores_kernel.cu
+  Per-head score kernel:
+    score[t] = dot(q_head, k_head_t) / sqrt(head_size)
+
+- src/cuda_kernels/softmax_kernel.cu
+  In-place stable softmax over one head's score vector.
+
+- src/cuda_kernels/attention_weighted_sum_kernel.cu
+  Per-head weighted value accumulation:
+    out[i] = sum_t att[t] * v_t[i]
+
+- src/cuda_kernels/swiglu_kernel.cu
+  SwiGLU elementwise gate:
+    hb[i] = SiLU(hb[i]) * hb2[i]
+
+Forward pass from beginning to end (kernel order)
+--------------------------------------------------
+For one token at position pos:
+
+1) Embedding lookup (CPU/GPU mem copy)
+   x <- token_embedding[token]
+
+2) For each layer l in [0..31]:
+   a) launch_rmsnorm(x, rms_att_weight[l], xb)
+   b) launch_matvec(Wq[l], xb, q)
+   c) launch_matvec(Wk[l], xb, k)
+   d) launch_matvec(Wv[l], xb, v)
+   e) launch_rope_qk(q, k, q_dim, k_dim, head_size, pos)
+   f) write k,v into KV cache
+   g) For each head h:
+      g1) launch_attention_scores(q_h, K_cache_h[0..pos], scores_h)
+      g2) launch_softmax_inplace(scores_h)
+      g3) launch_attention_weighted_sum(scores_h, V_cache_h[0..pos], head_out_h)
+   h) concat heads -> attn_out
+   i) launch_matvec(Wo[l], attn_out, xb2)
+   j) residual: x += xb2
+
+   k) launch_rmsnorm(x, rms_ffn_weight[l], xb)
+   l) launch_matvec(W1[l], xb, hb)
+   m) launch_matvec(W3[l], xb, hb2)
+   n) launch_swiglu(hb, hb2)
+   o) launch_matvec(W2[l], hb, xb)
+   p) residual: x += xb
+
+3) launch_rmsnorm(x, rms_final_weight, x)
+4) launch_matvec(Wcls, x, logits)
+5) sampler selects next token from logits
+
+Chunked, readable breakdown (math by kernel)
+--------------------------------------------
+A) RMSNorm kernel
+   Input:
+     x[0..dim-1], weight[0..dim-1]
+   Compute:
+     ss = 1/sqrt(mean(x^2)+eps)
+     out[j] = weight[j]*(x[j]*ss)
+   Output:
+     normalized and scaled vector out
+
+B) MatVec kernel
+   Input:
+     matrix W[d,n], vector x[n]
+   Compute:
+     out[i] = sum_j W[i,j]*x[j]
+   Output:
+     out[d]
+
+C) RoPE kernel
+   Input:
+     q and k vectors in 2-channel pairs
+   Compute per pair:
+     [x0'; x1'] = [cos -sin; sin cos] * [x0; x1]
+   Output:
+     rotated q and k
+
+D) Attention score kernel
+   Input:
+     q_head[head_size], K_cache_head[timesteps, head_size]
+   Compute:
+     score[t] = dot(q_head, k_t)/sqrt(head_size)
+   Output:
+     score vector over timesteps
+
+E) Softmax kernel
+   Input:
+     score vector
+   Compute:
+     p[t] = exp(score[t]-max)/sum(exp(...))
+   Output:
+     attention probabilities p
+
+F) Weighted sum kernel
+   Input:
+     p[t], V_cache_head[t, i]
+   Compute:
+     out[i] = sum_t p[t]*V[t,i]
+   Output:
+     one head output vector
+
+G) SwiGLU kernel
+   Input:
+     hb[i] = W1(x), hb2[i] = W3(x)
+   Compute:
+     hb[i] = (hb[i] * sigmoid(hb[i])) * hb2[i]
+   Output:
+     gated hidden vector for W2 projection
+
+How to build CUDA kernel modules
+--------------------------------
+CMake target added:
+- llama_cuda_kernels
+
+Build:
+  cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DLLAMA_INFERENCE_BUILD_CUDA_KERNELS=ON
+  cmake --build build -j
+
+Notes
+-----
+- Kernels are intentionally simple reference kernels for explainability.
+- The repo now uses kernel-wise source files (not one giant CUDA file).
+- This is the right base for profiling and optimization per kernel.

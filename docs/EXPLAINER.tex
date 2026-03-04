@@ -1,0 +1,168 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{amsmath}
+\usepackage{enumitem}
+
+\lstdefinestyle{code}{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false
+}
+
+\title{C++ Llama Inference Repository Handbook}
+\author{llama\_inference\_cpp}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Overview}
+This repository is a pure C++17 inference implementation for Llama-style checkpoints.
+It includes:
+\begin{itemize}[leftmargin=*]
+  \item tokenizer loading and BPE encoding/decoding,
+  \item model loading from \texttt{.bin} checkpoints,
+  \item full transformer forward pass,
+  \item autoregressive generation,
+  \item deterministic correctness tests.
+\end{itemize}
+
+\section{Codebase Layout}
+\begin{longtable}{p{0.24\linewidth} p{0.7\linewidth}}
+\toprule
+\textbf{Path} & \textbf{Purpose} \\
+\midrule
+\endhead
+\texttt{include/llama\_engine.hpp} & Public API declarations for tokenizer and inference engine. \\
+\texttt{src/llama\_engine.cpp} & Core implementation (load model, forward pass, generation, sampling). \\
+\texttt{src/main.cpp} & CLI application. \\
+\texttt{tests/test\_tokenizer.cpp} & Tokenizer correctness checks against known IDs. \\
+\texttt{tests/test\_generation.cpp} & End-to-end deterministic generation regression test. \\
+\texttt{scripts/download\_test\_models.sh} & Downloads tiny test assets. \\
+\texttt{CMakeLists.txt} & Build configuration for all targets. \\
+\bottomrule
+\end{longtable}
+
+\section{Core Data Structures}
+\subsection{Config}
+Holds model shape parameters:
+\begin{itemize}[leftmargin=*]
+  \item \texttt{dim}, \texttt{hidden\_dim}, \texttt{n\_layers},
+  \item \texttt{n\_heads}, \texttt{n\_kv\_heads},
+  \item \texttt{vocab\_size}, \texttt{seq\_len}.
+\end{itemize}
+
+\subsection{TransformerWeights}
+Pointer map into memory-mapped checkpoint for all weight tensors:
+\texttt{token\_embedding\_table, rms\_att\_weight, wq, wk, wv, wo, rms\_ffn\_weight, w1, w2, w3, rms\_final\_weight, wcls}.
+
+\subsection{RunState}
+Mutable inference buffers:
+\texttt{x, xb, xb2, hb, hb2, q, k, v, att, logits, key\_cache, value\_cache}.
+
+\section{Forward Pass Details}
+\subsection{Per-token process}
+For each generated position:
+\begin{enumerate}[leftmargin=*]
+  \item Load current token embedding into \texttt{x}.
+  \item For each layer:
+  \begin{enumerate}
+    \item attention RMSNorm,
+    \item Q/K/V projections,
+    \item RoPE rotation,
+    \item attention score computation over KV cache,
+    \item softmax normalization,
+    \item weighted value accumulation,
+    \item output projection and residual add,
+    \item FFN RMSNorm,
+    \item SwiGLU MLP,
+    \item FFN output projection and residual add.
+  \end{enumerate}
+  \item Final RMSNorm and classifier projection to logits.
+\end{enumerate}
+
+\subsection{Key equations}
+RMSNorm:
+\[
+\mathrm{RMSNorm}(x)_j = \gamma_j \cdot \frac{x_j}{\sqrt{\frac{1}{d}\sum_{i=1}^{d}x_i^2 + \epsilon}}
+\]
+
+Attention score:
+\[
+\mathrm{score}_{t,h} = \frac{q_h \cdot k_{t,h}}{\sqrt{d_h}}
+\]
+
+SwiGLU:
+\[
+\mathrm{FFN}(x) = W_2\big(\mathrm{SiLU}(W_1x) \odot W_3x\big)
+\]
+
+\section{Sampling}
+\begin{itemize}[leftmargin=*]
+  \item If \texttt{temperature == 0}: greedy argmax.
+  \item Else:
+  \begin{itemize}
+    \item scale logits by temperature,
+    \item softmax to probabilities,
+    \item sample from full distribution or top-p truncated distribution.
+  \end{itemize}
+\end{itemize}
+
+\section{Function-by-Function Summary}
+\begin{longtable}{p{0.28\linewidth} p{0.64\linewidth}}
+\toprule
+\textbf{Function} & \textbf{Description} \\
+\midrule
+\endhead
+\texttt{Tokenizer::load} & Reads tokenizer binary format and vocabulary strings/scores. \\
+\texttt{Tokenizer::encode} & UTF-8 aware tokenization with byte fallback and BPE merges. \\
+\texttt{Tokenizer::decode\_piece} & Converts token id to printable text fragment. \\
+\texttt{LlamaEngine::load\_model} & Reads config, mmaps checkpoint, maps all tensor pointers, allocates runtime buffers. \\
+\texttt{LlamaEngine::forward} & Computes one forward pass for one token position. \\
+\texttt{LlamaEngine::generate} & Repeatedly calls forward, samples next token, decodes text. \\
+\texttt{rmsnorm/softmax/matmul} & Primitive math kernels for transformer calculations. \\
+\texttt{sample\_*} & Different token sampling strategies. \\
+\bottomrule
+\end{longtable}
+
+\section{Correctness Tests}
+\subsection{Tokenizer regression}
+\texttt{tests/test\_tokenizer.cpp} checks known expected token IDs for canonical prompts.
+
+\subsection{Generation regression}
+\texttt{tests/test\_generation.cpp} runs 200 deterministic steps on
+\texttt{stories260K.bin} + \texttt{tok512.bin} and compares full output against a known reference string.
+
+\section{Build and Execution}
+\begin{lstlisting}[style=code]
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+
+./scripts/download_test_models.sh
+
+./build/tokenizer_test ./models/tokenizer.bin
+./build/generation_test ./models/stories260K.bin ./models/tok512.bin
+
+./build/llama_infer_cpp ./models/stories260K.bin --tokenizer ./models/tok512.bin --steps 100 --temperature 0.8 --topp 0.9
+\end{lstlisting}
+
+\section{Design Notes}
+\begin{itemize}[leftmargin=*]
+  \item Prioritizes readability and deterministic correctness checks.
+  \item Uses memory mapping for low-overhead model weight access.
+  \item Uses pure C++ runtime path (no Python dependency at inference time).
+\end{itemize}
+
+\end{document}

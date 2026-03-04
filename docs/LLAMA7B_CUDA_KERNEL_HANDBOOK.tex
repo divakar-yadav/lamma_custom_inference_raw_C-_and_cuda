@@ -1,0 +1,181 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{enumitem}
+
+\lstdefinestyle{code}{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false
+}
+
+\title{Llama 7B CUDA Kernel Handbook\\\large Modular, Kernel-wise Forward Pass Explanation}
+\author{llama\_inference\_cpp}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Goal}
+This handbook explains the modular CUDA kernel set written for Llama-7B-style inference in this repository:
+\begin{itemize}[leftmargin=*]
+  \item kernel by kernel,
+  \item calculation by calculation,
+  \item from the beginning to the end of the forward pass,
+  \item with code split into readable files.
+\end{itemize}
+
+\section{Model context}
+The 7B model used for this setup:
+\begin{itemize}[leftmargin=*]
+  \item checkpoint: \texttt{models/open\_llama\_7b\_v2.bin}
+  \item tokenizer: \texttt{models/open\_llama\_7b\_v2\_tokenizer.bin}
+\end{itemize}
+
+Typical dimensions in this 7B setup:
+\begin{itemize}[leftmargin=*]
+  \item \(\texttt{dim}=4096\)
+  \item \(\texttt{n\_layers}=32\)
+  \item \(\texttt{n\_heads}=32\)
+  \item \(\texttt{head\_size}=128\)
+  \item \(\texttt{hidden\_dim}=11008\)
+\end{itemize}
+
+\section{Modular kernel file layout}
+\begin{longtable}{p{0.43\linewidth} p{0.5\linewidth}}
+\toprule
+\textbf{File} & \textbf{Purpose} \\
+\midrule
+\endhead
+\texttt{include/cuda\_kernels/llama\_cuda\_kernels.cuh} & Kernel launch API (one function per op). \\
+\texttt{src/cuda\_kernels/rmsnorm\_kernel.cu} & RMSNorm computation kernel. \\
+\texttt{src/cuda\_kernels/matvec\_kernel.cu} & Matrix-vector projection kernel. \\
+\texttt{src/cuda\_kernels/rope\_kernel.cu} & RoPE position rotation for q and k. \\
+\texttt{src/cuda\_kernels/attention\_scores\_kernel.cu} & Dot-product attention scores per timestep. \\
+\texttt{src/cuda\_kernels/softmax\_kernel.cu} & In-place stable softmax for score vectors. \\
+\texttt{src/cuda\_kernels/attention\_weighted\_sum\_kernel.cu} & Value weighted-sum per head. \\
+\texttt{src/cuda\_kernels/swiglu\_kernel.cu} & SwiGLU elementwise nonlinearity. \\
+\bottomrule
+\end{longtable}
+
+\section{Forward pass from start to end (kernel order)}
+For one token at decoding position \texttt{pos}:
+
+\begin{enumerate}[leftmargin=*]
+  \item Embedding lookup: \(x \leftarrow E[token]\).
+  \item For each layer \(l\):
+  \begin{enumerate}
+    \item \texttt{launch\_rmsnorm} on \(x\) for attention branch.
+    \item \texttt{launch\_matvec} for \(W_qx, W_kx, W_vx\).
+    \item \texttt{launch\_rope\_qk} on \(q, k\).
+    \item Write \(k,v\) into KV cache at position \texttt{pos}.
+    \item For each head:
+      \begin{itemize}
+        \item \texttt{launch\_attention\_scores}
+        \item \texttt{launch\_softmax\_inplace}
+        \item \texttt{launch\_attention\_weighted\_sum}
+      \end{itemize}
+    \item \texttt{launch\_matvec} for \(W_o\) and attention residual add.
+    \item \texttt{launch\_rmsnorm} for FFN branch.
+    \item \texttt{launch\_matvec} for \(W_1x\) and \(W_3x\).
+    \item \texttt{launch\_swiglu}.
+    \item \texttt{launch\_matvec} for \(W_2\) and FFN residual add.
+  \end{enumerate}
+  \item Final \texttt{launch\_rmsnorm}.
+  \item \texttt{launch\_matvec} with \(W_{cls}\) to produce logits.
+\end{enumerate}
+
+\section{Kernel-by-kernel calculations}
+\subsection{RMSNorm kernel}
+\[
+\text{ss} = \frac{1}{\sqrt{\frac{1}{d}\sum_{j=0}^{d-1}x_j^2 + \epsilon}},
+\quad
+out_j = weight_j \cdot (x_j \cdot \text{ss})
+\]
+
+Code:
+\lstinputlisting[style=code]{../src/cuda_kernels/rmsnorm_kernel.cu}
+
+\subsection{MatVec kernel}
+\[
+out_i = \sum_{j=0}^{n-1} W_{i,j} x_j
+\]
+
+Code:
+\lstinputlisting[style=code]{../src/cuda_kernels/matvec_kernel.cu}
+
+\subsection{RoPE kernel}
+For channel pair \((x_0,x_1)\):
+\[
+\begin{bmatrix}x_0'\\x_1'\end{bmatrix}
+=
+\begin{bmatrix}\cos\theta & -\sin\theta\\ \sin\theta & \cos\theta\end{bmatrix}
+\begin{bmatrix}x_0\\x_1\end{bmatrix}
+\]
+
+Code:
+\lstinputlisting[style=code]{../src/cuda_kernels/rope_kernel.cu}
+
+\subsection{Attention score kernel}
+\[
+score_t = \frac{q\_{head}\cdot k\_{head,t}}{\sqrt{head\_size}}
+\]
+
+Code:
+\lstinputlisting[style=code]{../src/cuda_kernels/attention_scores_kernel.cu}
+
+\subsection{Softmax kernel}
+\[
+p_t = \frac{\exp(score_t - \max(score))}{\sum_u \exp(score_u - \max(score))}
+\]
+
+Code:
+\lstinputlisting[style=code]{../src/cuda_kernels/softmax_kernel.cu}
+
+\subsection{Attention weighted-sum kernel}
+\[
+out_i = \sum_{t=0}^{T-1} p_t \cdot v_{t,i}
+\]
+
+Code:
+\lstinputlisting[style=code]{../src/cuda_kernels/attention_weighted_sum_kernel.cu}
+
+\subsection{SwiGLU kernel}
+\[
+\mathrm{SiLU}(x)=x\cdot\sigma(x),\quad hb_i = \mathrm{SiLU}(hb_i)\cdot hb2_i
+\]
+
+Code:
+\lstinputlisting[style=code]{../src/cuda_kernels/swiglu_kernel.cu}
+
+\section{Single API header for readability}
+Public launch interfaces (one function per kernel):
+\lstinputlisting[style=code]{../include/cuda_kernels/llama_cuda_kernels.cuh}
+
+\section{Build}
+\begin{lstlisting}[style=code]
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DLLAMA_INFERENCE_BUILD_CUDA_KERNELS=ON
+cmake --build build -j
+\end{lstlisting}
+
+\section{Why this is modular and readable}
+\begin{itemize}[leftmargin=*]
+  \item Each CUDA operation is isolated in its own file.
+  \item One shared API header defines the launch surface.
+  \item Forward-pass order maps directly to the kernel sequence.
+  \item You can profile and optimize each kernel independently.
+\end{itemize}
+
+\end{document}
