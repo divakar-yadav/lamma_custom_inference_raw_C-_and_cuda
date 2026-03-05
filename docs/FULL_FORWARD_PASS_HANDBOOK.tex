@@ -263,4 +263,168 @@ Recommended order if studying implementation deeply:
   \item \texttt{src/engine\_math\_kernels.cpp}
 \end{enumerate}
 
+\newpage
+\section{Line-by-line annotated walkthrough}
+This section gives a direct code explanation from entry point to final token output.
+Line numbers below match the current repository files.
+
+\subsection{\texttt{src/main.cpp} (program entry)}
+\begin{longtable}{p{0.15\linewidth} p{0.77\linewidth}}
+\toprule
+\textbf{Line(s)} & \textbf{Explanation} \\
+\midrule
+\endhead
+\texttt{1} & Pulls in public API declarations (\texttt{LlamaEngine}, \texttt{Tokenizer}, \texttt{Config}). \\
+\texttt{3-6} & Standard libraries for argument parsing, time seed, and terminal output. \\
+\texttt{8} & Uses the project namespace so symbols can be referenced directly. \\
+\texttt{10-19} & Defines \texttt{usage()} to print supported CLI flags and defaults. \\
+\texttt{21} & Process entrypoint receives raw C arguments. \\
+\texttt{22-25} & Enforces required checkpoint argument; exits with code 1 on invalid call. \\
+\texttt{27-33} & Initializes defaults: tokenizer path, empty prompt, steps, temperature, top-p, seed. \\
+\texttt{35-47} & Parses optional flags with sequential scan and updates local settings. \\
+\texttt{49} & Starts exception boundary for runtime failures (I/O, malformed files, etc.). \\
+\texttt{50-51} & Creates engine and loads model checkpoint into mapped memory. \\
+\texttt{53-54} & Creates tokenizer and loads tokenizer vocabulary with model vocab size. \\
+\texttt{56} & Runs full prompt-to-generation flow and returns generated text string. \\
+\texttt{57} & Prints final generated text to stdout. \\
+\texttt{58-61} & Converts thrown exceptions to readable error output and exit code 2. \\
+\texttt{63} & Successful process exit. \\
+\bottomrule
+\end{longtable}
+
+\subsection{\texttt{src/engine\_lifecycle.cpp} (load and memory setup)}
+\begin{longtable}{p{0.15\linewidth} p{0.77\linewidth}}
+\toprule
+\textbf{Line(s)} & \textbf{Explanation} \\
+\midrule
+\endhead
+\texttt{12} & Default constructor; actual state is initialized lazily in \texttt{load\_model}. \\
+\texttt{14-22} & Destructor unmaps checkpoint, closes file descriptor, and frees run-state allocations. \\
+\texttt{24-25} & Starts run-state allocation and computes KV dimension per token position. \\
+\texttt{27-39} & Allocates all working buffers (\texttt{x}, \texttt{xb}, \texttt{hb}, \texttt{q}, cache, attention, logits). \\
+\texttt{33-35} & Keeps \texttt{k} and \texttt{v} as aliases (not owned memory), avoiding invalid free. \\
+\texttt{41-44} & Hard-fails if any allocation returns null. \\
+\texttt{47-60} & Frees owned buffers and sets pointers to null to avoid use-after-free or double free. \\
+\texttt{62-92} & Walks contiguous checkpoint tensor layout and assigns each \texttt{weights\_.*} pointer. \\
+\texttt{91} & Sets classifier weights to tied embeddings when shared-weights flag is enabled. \\
+\texttt{94-98} & Opens checkpoint header stream and throws with context if missing. \\
+\texttt{100-103} & Reads \texttt{Config} struct from file header. \\
+\texttt{105-107} & Decodes legacy sign convention for tied embeddings and normalizes vocab size. \\
+\texttt{109-111} & Gets total file size for later \texttt{mmap}. \\
+\texttt{113-121} & Opens FD and memory maps model file into process address space. \\
+\texttt{123-125} & Offsets past config header and maps all weight pointers. \\
+\texttt{126} & Allocates runtime activations and KV cache now that config is known. \\
+\bottomrule
+\end{longtable}
+
+\subsection{\texttt{src/tokenizer.cpp} (prompt to token IDs and back)}
+\begin{longtable}{p{0.15\linewidth} p{0.77\linewidth}}
+\toprule
+\textbf{Line(s)} & \textbf{Explanation} \\
+\midrule
+\endhead
+\texttt{11-13} & \texttt{qsort}/\texttt{bsearch} comparator for token string lexicographic order. \\
+\texttt{15-20} & Initializes tokenizer containers and invalidates sorted lookup cache. \\
+\texttt{22-25} & Precomputes one-byte printable lookup pieces for raw-byte fallback decoding. \\
+\texttt{27-30} & Opens tokenizer binary and throws on failure. \\
+\texttt{32-35} & Reads maximum token length metadata from tokenizer file. \\
+\texttt{38-57} & For each vocab entry: read score, read byte length, allocate token bytes, null-terminate. \\
+\texttt{62-71} & Lazily builds sorted vocabulary index the first time lookup is needed. \\
+\texttt{73-77} & Binary-searches token string and returns token id or \texttt{-1}. \\
+\texttt{80-83} & Starts encode path and reserves token vector capacity. \\
+\texttt{84-86} & Optional BOS token insertion. \\
+\texttt{88-91} & Adds dummy-prefix token for sentencepiece-style leading-space behavior. \\
+\texttt{93-96} & Creates temporary UTF-8 assembly buffer for candidate piece lookup. \\
+\texttt{97-123} & UTF-8 aware scan: assemble symbol, lookup piece, fallback to raw bytes if unknown. \\
+\texttt{125-146} & Greedy BPE merge loop: repeatedly merge best-scoring adjacent pair until convergence. \\
+\texttt{148-150} & Optional EOS token append. \\
+\texttt{152} & Returns final prompt token sequence. \\
+\texttt{155-159} & Decoding helper trims leading space after BOS continuation. \\
+\texttt{161-164} & Converts byte-escape tokens like \texttt{<0xAB>} into real single-byte pieces. \\
+\texttt{166-175} & Filters empty or non-printable single-byte fragments for cleaner terminal output. \\
+\texttt{177} & Returns human-readable token piece string. \\
+\bottomrule
+\end{longtable}
+
+\subsection{\texttt{src/engine\_math\_kernels.cpp} (primitive compute blocks)}
+\begin{longtable}{p{0.15\linewidth} p{0.77\linewidth}}
+\toprule
+\textbf{Line(s)} & \textbf{Explanation} \\
+\midrule
+\endhead
+\texttt{7} & \texttt{rmsnorm}: normalization primitive used before attention and FFN blocks. \\
+\texttt{9-12} & Computes sum of squared activations. \\
+\texttt{13-15} & Converts to inverse RMS with epsilon for numerical stability. \\
+\texttt{16-18} & Scales normalized input by learned per-channel weights. \\
+\texttt{21} & \texttt{softmax}: converts logits/scores into probability distribution. \\
+\texttt{23-28} & Finds max value to stabilize exponentials. \\
+\texttt{30-34} & Exponentiates shifted values and accumulates denominator sum. \\
+\texttt{35-37} & Normalizes every entry by denominator. \\
+\texttt{40} & \texttt{matmul}: reference GEMV kernel used for linear projections. \\
+\texttt{42-48} & For each output row, dot product row weights with input vector. \\
+\bottomrule
+\end{longtable}
+
+\subsection{\texttt{src/engine\_forward.cpp} (single-token transformer forward)}
+\begin{longtable}{p{0.15\linewidth} p{0.77\linewidth}}
+\toprule
+\textbf{Line(s)} & \textbf{Explanation} \\
+\midrule
+\endhead
+\texttt{8} & Starts one-step decode forward: input is current token id and position. \\
+\texttt{9-14} & Caches frequently used dimensions (\texttt{dim}, KV width, FFN hidden size, head size). \\
+\texttt{16-18} & Copies token embedding row into working state vector \texttt{x}. \\
+\texttt{20} & Iterates all transformer layers sequentially. \\
+\texttt{22} & Applies attention RMSNorm to current residual stream. \\
+\texttt{24-27} & Computes layer+position offset and binds \texttt{k}/\texttt{v} aliases into KV cache row. \\
+\texttt{28-30} & Computes Q, K, V linear projections. \\
+\texttt{33-47} & Applies RoPE rotation pairwise to query, and to key where KV dimension covers it. \\
+\texttt{50-52} & Loops each attention head and selects per-head query and attention buffer slice. \\
+\texttt{54-62} & Computes causal attention scores against all timesteps \texttt{[0..pos]}. \\
+\texttt{64} & Softmax converts raw scores to attention probabilities. \\
+\texttt{66-74} & Computes weighted sum of cached values for this head. \\
+\texttt{78} & Projects concatenated head outputs with \texttt{W\_o}. \\
+\texttt{79-81} & First residual connection: adds attention output into \texttt{x}. \\
+\texttt{84} & Applies FFN RMSNorm. \\
+\texttt{86-87} & Computes two FFN branches \texttt{W1(x)} and \texttt{W3(x)}. \\
+\texttt{90-95} & Applies SwiGLU gate: \texttt{silu(W1(x)) * W3(x)} element-wise. \\
+\texttt{97} & Projects gated hidden vector through \texttt{W2} back to model dimension. \\
+\texttt{98-100} & Second residual connection: FFN output added back into \texttt{x}. \\
+\texttt{104} & Applies final RMSNorm after last layer. \\
+\texttt{105} & Computes logits over full vocabulary with classifier matrix. \\
+\texttt{107} & Returns logits as \texttt{std::vector<float>}. \\
+\bottomrule
+\end{longtable}
+
+\subsection{\texttt{src/engine\_sampling.cpp} (logits to next token)}
+\begin{longtable}{p{0.15\linewidth} p{0.77\linewidth}}
+\toprule
+\textbf{Line(s)} & \textbf{Explanation} \\
+\midrule
+\endhead
+\texttt{8-18} & \texttt{sample\_argmax}: deterministic next-token selection (maximum probability). \\
+\texttt{20-29} & \texttt{sample\_mult}: cumulative CDF walk for multinomial sampling. \\
+\texttt{31-37} & Comparator for sorting probabilities descending in top-p sampling. \\
+\texttt{39-49} & Top-p prefilter: remove entries below nucleus cutoff floor. \\
+\texttt{51} & Sorts surviving candidates by probability descending. \\
+\texttt{53-61} & Finds smallest prefix whose cumulative mass exceeds \texttt{topp}. \\
+\texttt{63-71} & Samples inside nucleus prefix via CDF and mapped random coin. \\
+\texttt{74-79} & Xorshift-based integer RNG step for deterministic reproducibility. \\
+\texttt{81-83} & Converts RNG bits into float in \texttt{[0,1)}. \\
+\texttt{85-89} & \texttt{sample}: greedy path when temperature is exactly zero. \\
+\texttt{91-94} & Temperature scales logits, then softmax converts to probabilities. \\
+\texttt{96-100} & Chooses multinomial or top-p strategy based on \texttt{topp} range. \\
+\texttt{103-110} & \texttt{generate} signature: prompt text to generated output string. \\
+\texttt{112-115} & Tokenizes prompt and guards against empty token sequence. \\
+\texttt{117-118} & Allocates reusable top-p scratch buffer and initializes RNG state. \\
+\texttt{120-126} & Initializes autoregressive loop state and output string buffer. \\
+\texttt{127-130} & Each step runs forward pass to get logits for next token. \\
+\texttt{132-136} & Forces prompt tokens while prompt remains; samples afterward. \\
+\texttt{137} & Advances decode position. \\
+\texttt{139-141} & Stops on EOS token id 1 (project convention used by this checkpoint path). \\
+\texttt{143-145} & Decodes token piece, appends text, then shifts context token. \\
+\texttt{148} & Returns final generated text. \\
+\bottomrule
+\end{longtable}
+
 \end{document}
